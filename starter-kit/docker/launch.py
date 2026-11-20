@@ -12,6 +12,41 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def configuration_key_env(run, compose, *, require_model=True):
+    """Parse YAML in the official image; the host needs only standard Python."""
+    probe = """import json, yaml
+from run import validate_config
+with open('/app/config.yaml') as stream:
+    config = yaml.safe_load(stream)
+try:
+    validate_config(config, require_model=REQUIRE_MODEL)
+except ValueError as exc:
+    raise SystemExit(str(exc)) from None
+print(json.dumps(config['model'].get('api_key_env', 'MODEL_API_KEY')))
+"""
+    probe = probe.replace('REQUIRE_MODEL', repr(require_model))
+    try:
+        checked = run(compose + ['run', '--rm', '--no-deps', '--entrypoint', 'python',
+                                 'official', '-c', probe], capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        print('Configuration check failed: ' + (exc.stderr or '').strip(), file=sys.stderr)
+        raise
+    name = json.loads(checked.stdout)
+    # Only a variable name crosses back to the launcher; never YAML or secrets.
+    import re
+    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name) or name.endswith('_FILE'):
+        raise ValueError('Invalid configured API key environment variable')
+    return name
+
+
+def read_model_key(key_env, environment):
+    key_file = environment.get(key_env + '_FILE')
+    key = Path(key_file).read_text().strip() if key_file else environment.get(key_env, '').strip()
+    if not key:
+        raise ValueError(f'Set {key_env} or {key_env}_FILE before model runs')
+    return key
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('build', 'check', 'run', 'verify'))
@@ -21,6 +56,8 @@ def main():
     parser.add_argument('--official-image', default='agentic-official:cpu')
     parser.add_argument('--data', type=Path, default=ROOT / 'data')
     parser.add_argument('--resources', type=Path, default=ROOT / 'resources')
+    parser.add_argument('--config', type=Path, default=ROOT / 'config.yaml',
+                        help='Local runtime configuration; mounted read-only in the official container')
     parser.add_argument('--output', type=Path, default=ROOT / 'results')
     parser.add_argument('--smoke', type=int, default=0)
     parser.add_argument('--build', action='store_true', help='Build both images first')
@@ -33,6 +70,8 @@ def main():
     if args.smoke < 0 or args.cpus <= 0:
         parser.error('Invalid smoke count or CPU allocation')
     is_model_run = args.command == 'run'
+    if not args.config.resolve().is_file():
+        parser.error(f'Missing configuration: {args.config}')
     for name, path in [('data', args.data), ('resources', args.resources)]:
         if args.command not in ('build', 'verify') and not path.resolve().is_dir():
             parser.error(f'Missing {name}: {path}')
@@ -86,17 +125,15 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='agentic-secret-') as temporary:
         secret = Path(temporary) / 'model_key'
-        key = os.environ.get('OPENROUTER_API_KEY', '')
-        if os.environ.get('OPENROUTER_API_KEY_FILE'):
-            key = Path(os.environ['OPENROUTER_API_KEY_FILE']).read_text().strip()
-        if is_model_run and not key:
-            parser.error('Set OPENROUTER_API_KEY or OPENROUTER_API_KEY_FILE before model runs')
-        secret.write_text(key if is_model_run else '')
+        # Freeze one configuration for all domains in this launch. Edits take
+        # effect next time, not halfway through a run.
+        runtime_config = Path(temporary) / 'config.yaml'
+        runtime_config.write_bytes(args.config.resolve().read_bytes())
+        runtime_config.chmod(0o444)
+        environment['RUNTIME_CONFIG'] = str(runtime_config)
+        secret.write_text('')
         secret.chmod(0o444)  # Parent temp directory is private; container reads this file only.
         environment['MODEL_KEY_FILE'] = str(secret)
-        # Never pass raw model credentials as Docker/Compose environment values.
-        environment.pop('OPENROUTER_API_KEY', None)
-        environment.pop('OPENROUTER_API_KEY_FILE', None)
         try:
             info = json.loads(run(['docker', 'info', '--format', '{{json .}}'],
                                   capture_output=True, text=True).stdout)
@@ -121,10 +158,23 @@ def main():
             # Pin exact local image IDs for this execution, not mutable tags.
             environment.update(ALGORITHM_IMAGE=images['algorithm'], OFFICIAL_IMAGE=images['official'],
                                ALGORITHM_IMAGE_ID=images['algorithm'], OFFICIAL_IMAGE_ID=images['official'])
+            key_env = configuration_key_env(run, compose, require_model=is_model_run)
+            if is_model_run:
+                key = read_model_key(key_env, os.environ)
+                secret.chmod(0o600)
+                secret.write_text(key)
+                secret.chmod(0o444)
+            # Compose receives the secret file path, not the model credential.
+            for name in (key_env, key_env + '_FILE', 'OPENROUTER_API_KEY', 'OPENROUTER_API_KEY_FILE'):
+                # Preserve launcher-owned values if a chosen variable name
+                # happens to overlap one (e.g. MODEL_KEY_FILE).
+                if environment.get(name) == os.environ.get(name):
+                    environment.pop(name, None)
             (output / 'launch.json').write_text(json.dumps({
                 'images': images, 'command': args.command, 'method': args.method,
                 'smoke': args.smoke, 'algorithm_cpus': args.cpus, 'algorithm_memory': args.memory,
                 'platform': 'linux/amd64',
+                'config_file': str(args.config.resolve()),
             }, indent=2) + '\n')
             run(compose + ['up', '-d', '--wait', '--wait-timeout', '120', 'algorithm'])
             monitor = threading.Thread(target=monitor_restarts, daemon=True)
@@ -153,9 +203,10 @@ def main():
                 }, indent=2) + '\n')
                 # Check the actual algorithm namespace, not just the YAML.
                 probe = """import os, pathlib, socket
-for p in ['/app/test', '/app/resources', '/app/environments', '/app/results', '/run/secrets/model_key', '/var/run/docker.sock']:
+for p in ['/app/test', '/app/resources', '/app/environments', '/app/results', '/app/config.yaml', '/run/secrets/model_key', '/var/run/docker.sock']:
  assert not pathlib.Path(p).exists(), p
 assert not os.environ.get('OPENROUTER_API_KEY')
+assert not os.environ.get('MODEL_API_KEY_FILE')
 assert os.getuid() != 0
 assert 'CapEff:\\t0000000000000000' in pathlib.Path('/proc/self/status').read_text()
 try:
@@ -204,9 +255,11 @@ client.cancel()
                 run(base + command)
             print(f'Host results: {output}', flush=True)
             return 0
-        except (subprocess.CalledProcessError, KeyboardInterrupt, ValueError) as exc:
+        except (subprocess.CalledProcessError, KeyboardInterrupt, ValueError, OSError) as exc:
             (output / 'launch_error.json').write_text(json.dumps({'complete': False, 'error_type': type(exc).__name__}) + '\n')
             print(f'Run incomplete; inspect {output}. No final score should be inferred.', file=sys.stderr)
+            if isinstance(exc, ValueError):
+                print(str(exc), file=sys.stderr)
             return 1
         finally:
             monitor_stop.set()

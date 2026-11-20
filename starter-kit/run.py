@@ -88,11 +88,14 @@ ROOT = Path(__file__).resolve().parent
 
 def model_credentials(config):
     model = config['model']
-    key = os.environ.get(model.get('api_key_env', 'OPENROUTER_API_KEY'), '')
-    key_file = os.environ.get('OPENROUTER_API_KEY_FILE')
+    key_env = model.get('api_key_env', 'MODEL_API_KEY')
+    key = os.environ.get(key_env, '')
+    # The launcher mounts a secret using a provider-neutral container variable.
+    # Native runs may use the configured variable or its _FILE companion.
+    key_file = os.environ.get('MODEL_API_KEY_FILE') or os.environ.get(key_env + '_FILE')
     if key_file:
         key = Path(key_file).read_text().strip()
-    key = (key or model.get('api_key', '')).strip()
+    key = key.strip()
     if not key:
         raise ValueError('Provide the model API key to the official container only')
     return {'base': model['base_url'], 'provider': model['provider'],
@@ -298,22 +301,44 @@ async def experiment(config, tasks, corpus, data_report, algorithm, project_root
     return {'directory': str(directory), 'summary': result}
 
 
-def validate_config(config):
+def validate_config(config, *, require_model=True):
     if not isinstance(config, dict) or set(config) != {'model', 'algorithm', 'data', 'limits', 'output'}:
         raise ValueError('Configuration requires model, algorithm, data, limits and output')
     model = config['model']
-    required = {'provider', 'base_url', 'name', 'temperature', 'max_tokens', 'reasoning',
-                'request_timeout_seconds', 'provider_order', 'allow_fallbacks'}
+    if not isinstance(model, dict):
+        raise ValueError('model must be a mapping')
+    required = {'provider', 'base_url', 'name', 'temperature', 'max_tokens',
+                'request_timeout_seconds'}
     if not required.issubset(model):
         raise ValueError('Incomplete model configuration')
-    if model['reasoning'] not in ('disabled', 'enabled', 'auto'):
+    if model.get('reasoning', 'auto') not in ('disabled', 'enabled', 'auto'):
         raise ValueError('Invalid reasoning setting')
     if type(model['temperature']) not in (int, float) or not 0 <= model['temperature'] <= 2:
         raise ValueError('Temperature must be between 0 and 2')
-    if not isinstance(model['provider_order'], list) or not all(isinstance(p,str) and p for p in model['provider_order']):
+    providers = model.get('provider_order', [])
+    if not isinstance(providers, list) or not all(isinstance(p,str) and p for p in providers):
         raise ValueError('provider_order must be a list of provider names')
-    if type(model['allow_fallbacks']) is not bool or len(model['provider_order']) > 1 or (model['provider_order'] and model['allow_fallbacks']):
-        raise ValueError('Pin one provider and disable fallbacks for comparisons')
+    if type(model.get('allow_fallbacks', False)) is not bool:
+        raise ValueError('allow_fallbacks must be a boolean')
+    if any(k in model for k in ('reasoning', 'provider_order', 'allow_fallbacks')) and str(model.get('provider', '')).lower() != 'openrouter':
+        raise ValueError('Legacy routing/reasoning fields are OpenRouter-only; use extra_body for your endpoint')
+    from urllib.parse import urlsplit
+    import re
+    if model.get('api_key'):
+        raise ValueError('Keep API keys outside config; use api_key_env or its _FILE companion')
+    key_env = model.get('api_key_env', 'MODEL_API_KEY')
+    if not isinstance(key_env, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key_env) or key_env.endswith('_FILE'):
+        raise ValueError('api_key_env must name an environment variable, without the _FILE suffix')
+    extra = model.get('extra_body', {})
+    if not isinstance(extra, dict) or not all(isinstance(k, str) for k in extra):
+        raise ValueError('extra_body must be a mapping with string keys')
+    if set(extra) & {'model', 'messages', 'tools', 'tool_choice', 'parallel_tool_calls',
+                     'stream', 'temperature', 'max_tokens', 'api_key', 'headers', 'authorization'}:
+        raise ValueError('extra_body cannot override core request fields or contain credentials')
+    try:
+        json.dumps(extra, allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError('extra_body must contain finite JSON values') from None
     for section, keys in {'model': ('max_tokens', 'request_timeout_seconds'),
                           'limits': ('max_actions', 'max_model_calls', 'episode_timeout_seconds')}.items():
         for key in keys:
@@ -324,8 +349,11 @@ def validate_config(config):
     if not isinstance(config['algorithm'].get('options', {}), dict) or 'top_k' in config['algorithm']:
         raise ValueError('Use algorithm.options; there is no global top_k setting')
     for key in ('provider', 'base_url', 'name'):
-        if not isinstance(model[key], str) or not model[key].strip():
+        if not isinstance(model[key], str) or ((require_model or key == 'provider') and not model[key].strip()):
             raise ValueError(f'model.{key} must be a nonempty string')
+    url = urlsplit(model['base_url'])
+    if model['base_url'] and (url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password or url.query or url.fragment):
+        raise ValueError('base_url must be an HTTP(S) API base address without credentials, query or fragment')
     if not isinstance(config['output'].get('directory'), str) or not config['output']['directory']:
         raise ValueError('output.directory must be a nonempty string')
 
@@ -371,7 +399,7 @@ def main(argv=None):
     if args.smoke < 0:
         parser.error('--smoke must be nonnegative')
     config = yaml.safe_load(args.config.read_text())
-    validate_config(config)
+    validate_config(config, require_model=not args.check)
     config['data'].update(dataset=args.dataset, root=str(ROOT / 'data' / args.dataset), evaluation_split='validation')
     config['algorithm'].update(name=args.method.stem, kind='remote', method=str(args.method))
     algorithm = remote_algorithm(config, args.method)

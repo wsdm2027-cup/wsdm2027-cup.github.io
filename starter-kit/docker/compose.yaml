@@ -50,9 +50,14 @@ services:
       ALGORITHM_URL: http://algorithm:8765
       ALGORITHM_IMAGE_ID: ${ALGORITHM_IMAGE_ID:-unverified}
       ALGORITHM_CONTROL_DIR: /app/results/.control
-      OPENROUTER_API_KEY_FILE: /run/secrets/model_key
+      MODEL_API_KEY_FILE: /run/secrets/model_key
     secrets: [model_key]
     volumes:
+      - type: bind
+        source: ${RUNTIME_CONFIG:-../config.yaml}
+        target: /app/config.yaml
+        read_only: true
+        bind: {create_host_path: false}
       - type: bind
         source: ${PUBLIC_DATA:-../data}
         target: /app/data

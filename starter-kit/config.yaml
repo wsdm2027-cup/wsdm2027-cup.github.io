@@ -1,16 +1,16 @@
-# Shared runtime settings. Keep API credentials in the environment.
+# Local development settings. Organizers use their own configuration for evaluation.
+# Changes take effect on the next launch; no image rebuild is needed.
+# Fill in base_url and name before running tasks. OpenAI denotes the compatible
+# Chat Completions protocol, not a required vendor. Keep credentials outside YAML.
 model:
-  provider: OpenRouter
-  base_url: https://openrouter.ai/api/v1
-  name: qwen/qwen3.5-9b
+  provider: OpenAI  # Compatible protocol for OpenRouter or Qwen/DashScope, not a vendor name.
+  base_url: ""  # OpenRouter: https://openrouter.ai/api/v1; DashScope (Beijing): https://dashscope.aliyuncs.com/compatible-mode/v1
+  name: ""  # OpenRouter: qwen/qwen3.5-9b; other providers: their exact Qwen3.5-9B model ID, if available.
   temperature: 0.0
   max_tokens: 2048
-  reasoning: disabled
   request_timeout_seconds: 120
-  provider_order:
-  - together
-  allow_fallbacks: false
-  api_key_env: OPENROUTER_API_KEY
+  api_key_env: MODEL_API_KEY
+  extra_body: {}  # Optional service/model-specific parameters.
 algorithm:
   endpoint: http://algorithm:8765
   options: {}

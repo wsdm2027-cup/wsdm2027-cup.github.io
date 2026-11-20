@@ -34,13 +34,19 @@ python3 docker/launch.py check
 
 The launcher manages both containers: one for the official agent and environments, one for your algorithm. Builds need Internet access; `check` checks the data without calling the model.
 
-The default model is **Qwen3.5-9B**. Set your OpenRouter API key in Bash, then run BM25 on the 50 ALFWorld development tasks:
+The default benchmark model is **Qwen3.5-9B**. Fill in `model.base_url` and your provider's exact model ID in `model.name`; examples are in `config.yaml`. Use an OpenAI-compatible Chat Completions API with tool calling and non-streaming support; keep `provider: OpenAI`. Organizers use their own configuration for evaluation.
+
+Official evaluation uses the model with thinking mode disabled. Disable it for comparable local runs using your provider's documented settings.
+
+Set your key in Bash, then run BM25 on the 50 ALFWorld development tasks:
 
 ```bash
-read -rsp 'OpenRouter API key: ' OPENROUTER_API_KEY
-export OPENROUTER_API_KEY
+read -rsp 'Model API key: ' MODEL_API_KEY
+export MODEL_API_KEY
 python3 docker/launch.py run --dataset alfworld --method algorithms/baselines/bm25.py
 ```
+
+Configuration changes take effect on the next run without rebuilding the images. Never include API keys in your submission.
 
 Choose `alfworld`, `webshop`, `hotpotqa` or `all` (all 150 development tasks). Other baselines in `algorithms/baselines/` are `no_retrieval.py`, `random.py` and `dense_static.py`.
 
@@ -50,10 +56,10 @@ Results are under `results/containers_*/`; see each dataset's `summary.json` for
 
 Start with [algorithms/methods/example.py](algorithms/methods/example.py). Implement `create_algorithm(config)` and the `prepare`, `reset` and `get_guidance` methods described in [base.py](algorithms/base.py). Your method receives the task and observations and returns `Guidance(text, retrieved_ids)`.
 
-- Put your code under `algorithms/methods/`; keep the supplied interface and service files.
+- Place all custom code, model files and supporting assets under `algorithms/`, with your method entry point under `algorithms/methods/`. Keep the supplied interface and service files unchanged.
 - Add Python dependencies to `docker/requirements.algorithm.txt`, and system dependencies to `docker/Dockerfile.algorithm`.
-- Extra models must support CPU and be included during the build. Runtime is offline. Local model files can go under `algorithms/`.
-- Keep the template's container settings. Write temporary files to `/tmp` or `/cache`, not the read-only application directory.
+- Extra models must support CPU and be included during the build. Runtime is offline.
+- Keep the template's container settings. Write runtime caches and indexes to `/cache` or `/tmp`; the application directory is read-only.
 
 Rebuild after changing code, dependencies or models, then run your image:
 
@@ -86,7 +92,7 @@ submission/
 └── README.md
 ```
 
-Include other files needed to build the image. Your submission README should give the image tag, method path, build command and details of any extra models or training data. Do not include API keys, the official image or benchmark data. See the [challenge website](https://wsdm2027-cup.github.io/agenticsearch/) for submission announcements.
+Include all custom supporting files under `algorithms/`. Your submission README should give the image tag, method path, build command and details of any extra models or training data. Do not include API keys, the official image or benchmark data. See the [challenge website](https://wsdm2027-cup.github.io/agenticsearch/) for submission announcements.
 
 ## 6. Scores and limits
 

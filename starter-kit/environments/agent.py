@@ -44,25 +44,27 @@ def model_failure(exc):
 
 
 def model_settings(config, credentials):
-    """Put OpenRouter controls in the request body, not unused client extensions."""
-    from urllib.parse import urlsplit
-    if urlsplit(credentials['base']).hostname != 'openrouter.ai':
-        raise ValueError('This experiment runner currently supports OpenRouter only')
-    providers = config.get('provider_order', [])
-    if len(providers) > 1 or (providers and config['allow_fallbacks']):
-        raise ValueError('Comparisons require one provider and allow_fallbacks=false')
-    routing = {'require_parameters': True, 'allow_fallbacks': config['allow_fallbacks']}
-    if providers:
-        routing.update(only=providers, order=providers)
-    body = {'provider': routing}
-    if config['reasoning'] != 'auto':
-        body['reasoning'] = {'enabled': config['reasoning'] == 'enabled'}
+    """Use the configured Chat Completions endpoint and explicit extensions."""
+    from copy import deepcopy
+    body = deepcopy(config.get('extra_body', {}))
+    # Retain support for older organizer configs without applying gateway
+    # extensions to other providers. New configs use extra_body directly.
+    if credentials['provider'].lower() == 'openrouter':
+        if 'provider_order' in config or 'allow_fallbacks' in config:
+            routing = {'require_parameters': True,
+                       'allow_fallbacks': config.get('allow_fallbacks', False)}
+            providers = config.get('provider_order', [])
+            if providers:
+                routing.update(only=providers, order=providers)
+            body.setdefault('provider', routing)
+        if config.get('reasoning', 'auto') != 'auto':
+            body.setdefault('reasoning', {'enabled': config['reasoning'] == 'enabled'})
     client = ModelClientConfig(
         client_provider=credentials['provider'], api_key=credentials['key'],
         api_base=credentials['base'], api_mode='chat_completions', verify_ssl=True,
         timeout=config['request_timeout_seconds'], max_retries=0,
         openrouter_enable_explicit_prompt_caching=False)
-    # Deliberately omit neutral reasoning: send the gateway's native control.
+    # Provider-specific controls are explicit; never guess a thinking switch.
     model = ModelRequestConfig(model=credentials['model'], temperature=config['temperature'],
                                max_tokens=config['max_tokens'],
                                extra_body=body)
@@ -88,8 +90,8 @@ class RecordedModel(Model):
                         'temperature', 'top_p', 'max_tokens', 'parallel_tool_calls', 'stream',
                         'extra_body') if k in params}
                 expected = self.model_config.extra_body
-                if safe.get('extra_body') != expected:
-                    raise ValueError('SDK changed required OpenRouter request controls')
+                if (safe.get('extra_body') or {}) != (expected or {}):
+                    raise ValueError('SDK changed configured model request extensions')
                 captured.update(safe)
                 self.recorder.trace(self.task_id, 'api_request', request=safe,
                                     request_sha256=digest(safe))
