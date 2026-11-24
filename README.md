@@ -1,5 +1,7 @@
 # Agentic Search over Instruction Trajectories
 
+[![Community: join the Discord](https://img.shields.io/badge/Community-Join%20the%20Discord-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/XebBpa4fT) [![GitHub: jiuwenswarm](https://img.shields.io/badge/GitHub-jiuwenswarm-181717?logo=github&logoColor=white)](https://github.com/openJiuwen-ai/jiuwenswarm) [![WeChat: openJiuwen](https://img.shields.io/badge/WeChat-openJiuwen-07C160?logo=wechat&logoColor=white)](assets/openjiuwen-wechat.png)
+
 **WSDM Cup 2027** · [ACM WSDM 2027](https://www.wsdm-conference.org/2027/), February 15–19, 2027, Hong Kong
 
 The agent, its tools, its model and its execution limits are fixed. Your method decides what the agent
